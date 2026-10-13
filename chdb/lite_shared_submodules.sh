@@ -1,6 +1,9 @@
 #!/bin/bash
 # Initialise only the submodules that `CHDB_LITE=1 CHDB_LITE_SHARED=1 bash chdb/build.sh` needs
-# (43 of 156), shallow and at the SHA pinned by this checkout. Idempotent; safe to re-run.
+# (43 of 156), shallow and at the SHA pinned by this checkout. Safe to re-run: a submodule that already exists is
+# only moved to its pinned SHA and its sparse patterns are NOT reapplied, so one first cloned in full (for example
+# by `git clone --recurse-submodules`) stays full. To get the sparse checkout, delete its contrib/ directory and its
+# .git/modules/ entry first.
 #
 #   bash chdb/lite_shared_submodules.sh
 #
