@@ -123,6 +123,24 @@ if [ "${CHDB_LITE}" = "1" ]; then
         -DENABLE_AVX512=0 -DENABLE_AVX512_VBMI=0 \
         -DCHDB_VERSION=${CHDB_VERSION} \
         "
+    if [ "${CHDB_LITE_SHARED}" = "1" ]; then
+        # Shared libchdb.so for Go (chdb-go / chdb-sql): no Arrow, Parquet or ADBC, no S3, no Protobuf formats.
+        # CHDB_NO_ARROW needs ENABLE_PYTHON=0, which the libchdb.so block below passes. Linux only: the export
+        # map handling below is the Linux version script.
+        if [ "$(uname)" != "Linux" ]; then
+            echo "CHDB_LITE_SHARED=1 is only implemented for Linux"
+            exit 1
+        fi
+        for _need in contrib/llvm-project/libcxx contrib/sysroot/linux-x86_64 contrib/clickstack/out contrib/arrow/cpp/src/arrow/c; do
+            if [ ! -d "${PROJ_DIR}/${_need}" ]; then
+                echo "CHDB_LITE_SHARED=1: ${_need} is missing; run: bash chdb/lite_shared_submodules.sh"
+                exit 1
+            fi
+        done
+        CMAKE_ARGS="${CMAKE_ARGS} -DCHDB_NO_ARROW=ON -DENABLE_PARQUET=0 -DENABLE_THRIFT=0 -DENABLE_BROTLI=0 \
+            -DENABLE_RAPIDJSON=0 -DENABLE_AWS_S3=0 -DENABLE_PROTOBUF=0 \
+            -DPARALLEL_COMPILE_JOBS=${CHDB_PARALLEL_COMPILE_JOBS:-6} -DPARALLEL_LINK_JOBS=${CHDB_PARALLEL_LINK_JOBS:-1}"
+    fi
 else
     # Explicit -DCHDB_LITE=OFF resets the cmake cache when buildlib/ was previously
     # configured for chdb-core-lite (CI runs lite before FT in the same buildlib/).
@@ -164,9 +182,9 @@ fi
 
 LIBCHDB_SO="libchdb.so"
 BINARY=${BUILD_DIR}/programs/clickhouse
-# chdb-core-lite only ships the Python module (_chdb.abi3.so), so skip the
-# standalone libchdb.so build entirely. It saves ~half the link time.
-if [ "${CHDB_LITE}" != "1" ]; then
+# Plain chdb-core-lite only ships the Python module (_chdb.abi3.so), so it skips the standalone libchdb.so build.
+# CHDB_LITE_SHARED=1 builds libchdb.so (and nothing else) instead.
+if [ "${CHDB_LITE}" != "1" ] || [ "${CHDB_LITE_SHARED}" = "1" ]; then
     # Build libchdb.so
     cmake ${CMAKE_ARGS} -DENABLE_PYTHON=0 ${PROJ_DIR}
     ninja -d keeprsp
@@ -216,7 +234,14 @@ if [ "${CHDB_LITE}" != "1" ]; then
         LIBCHDB_CMD="${LIBCHDB_CMD} -Wl,-install_name,@rpath/libchdb.so"
     else
         # Linux: use version script
-        LIBCHDB_CMD="${LIBCHDB_CMD} -Wl,--version-script=${CHDB_DIR}/libchdb_export.map"
+        EXPORT_MAP=${CHDB_DIR}/libchdb_export.map
+        if [ "${CHDB_LITE_SHARED}" = "1" ]; then
+            # CHDB_NO_ARROW removes the Arrow and ADBC entry points; lld rejects exact version-script names
+            # that are not defined, so drop them from the map.
+            EXPORT_MAP=${BUILD_DIR}/libchdb_export_noarrow.map
+            sed -E '/arrow|[Aa]dbc/d' ${CHDB_DIR}/libchdb_export.map > ${EXPORT_MAP}
+        fi
+        LIBCHDB_CMD="${LIBCHDB_CMD} -Wl,--version-script=${EXPORT_MAP}"
     fi
 
     LIBCHDB_CMD=$(echo ${LIBCHDB_CMD} | sed 's/@CMakeFiles\/clickhouse.rsp/@CMakeFiles\/libchdb.rsp/g')
@@ -231,6 +256,21 @@ if [ "${CHDB_LITE}" != "1" ]; then
     LIBCHDB_DIR=${BUILD_DIR}/
     LIBCHDB=${LIBCHDB_DIR}/${LIBCHDB_SO}
     ls -lh ${LIBCHDB}
+
+    if [ "${CHDB_LITE_SHARED}" = "1" ]; then
+        # chdb-core-lite shared: libchdb.so only. Keep the unstripped link output in buildlib/ and ship a
+        # stripped copy; skip the Python module tail below.
+        cp -a ${LIBCHDB} ${PROJ_DIR}/${LIBCHDB_SO}
+        ${STRIP} --strip-unneeded --remove-section=.comment --remove-section=.note ${PROJ_DIR}/${LIBCHDB_SO}
+        echo -e "\nLIBCHDB (lite shared, stripped): ${PROJ_DIR}/${LIBCHDB_SO}"
+        ls -lh ${LIBCHDB} ${PROJ_DIR}/${LIBCHDB_SO}
+        echo -e "\nldd ${PROJ_DIR}/${LIBCHDB_SO}"
+        ${LDD} ${PROJ_DIR}/${LIBCHDB_SO}
+        echo -e "\nExported C API in ${PROJ_DIR}/${LIBCHDB_SO}"
+        ${NM} -D --defined-only ${PROJ_DIR}/${LIBCHDB_SO} | grep -E ' [TW] (chdb_|query_|free_result|connect_chdb|close_conn)' || true
+        ccache -s || true
+        exit 0
+    fi
 fi
 
 # build chdb python module
