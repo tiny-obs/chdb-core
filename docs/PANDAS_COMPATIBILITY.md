@@ -890,7 +890,7 @@ DataStore requires **pandas >= 2.1.0** and **Python >= 3.9**.
 
 ## Getting Help
 
-- **Documentation**: See [DataStore README](../README.md)
+- **Documentation**: See [DataStore README](../README.upstream.md)
 - **Examples**: Check [examples/example_pandas_extended.py](../examples/example_pandas_extended.py)
 - **Pandas Docs**: https://pandas.pydata.org/docs/reference/frame.html
 

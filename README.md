@@ -1,619 +1,118 @@
-<div align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/chdb-io/chdb/raw/main/docs/_static/snake-chdb-dark.png" height="130">
-  <img src="https://github.com/chdb-io/chdb/raw/main/docs/_static/snake-chdb.png" height="130">
-</picture>
+# chdb-core, `lite-shared` branch
 
-[![Build X86](https://github.com/chdb-io/chdb/actions/workflows/build_linux_x86_wheels.yml/badge.svg?event=release)](https://github.com/chdb-io/chdb/actions/workflows/build_linux_x86_wheels.yml)
-[![PyPI](https://img.shields.io/pypi/v/chdb.svg)](https://pypi.org/project/chdb/)
-[![Downloads](https://static.pepy.tech/badge/chdb)](https://pepy.tech/project/chdb)
-[![Discord](https://img.shields.io/discord/1098133460310294528?logo=Discord)](https://discord.gg/D2Daa2fM5K)
-[![Twitter](https://img.shields.io/twitter/url/http/shields.io.svg?style=social&label=Twitter)](https://twitter.com/chdb_io)
-</div>
+A fork of [chdb-io/chdb-core](https://github.com/chdb-io/chdb-core) at tag `v26.9.0` that adds one build mode: a
+small, Linux-only `libchdb.so` of the embedded ClickHouse engine, for use from Go.
 
-# chdb-core
+- This fork: <https://github.com/tiny-obs/chdb-core>
+- Go `database/sql` driver for this library: <https://github.com/tiny-obs/chdb-sql>
+- Original project README: [README.upstream.md](./README.upstream.md). It still applies to the default builds; this
+  branch does not change them.
 
-> chdb-core is the foundational engine of the [chDB](https://github.com/chdb-io/chdb) ecosystem — an in-process SQL OLAP Engine powered by ClickHouse [^1]
+## What changed
 
-## Table of Contents
+| File | Change |
+|---|---|
+| `chdb/build.sh` | New mode `CHDB_LITE_SHARED=1` (with `CHDB_LITE=1`): builds only `libchdb.so`, strips it, and prints `ldd` and the exported C API. Linux only. Applies the trims below, caps build jobs, and checks that the required submodules are present. |
+| `chdb/lite_shared_submodules.sh` | New. Initialises the 43 submodules this build needs, shallow and at the pinned SHA. |
+| `programs/local/CMakeLists.txt` | New option `CHDB_NO_ARROW` (default off): builds the core C API and embedded server with the source set of the wasm build, so Arrow and Parquet are not compiled. Fails if combined with `ENABLE_PYTHON`. |
+| `programs/local/chdb.cpp`, `EmbeddedServer.cpp`, `LocalServer.cpp` | Arrow includes and registrations are guarded with `!defined(CHDB_NO_ARROW)`. |
+| `README.md`, `README.upstream.md`, `setup.cfg`, `docs/PANDAS_COMPATIBILITY.md` | This file is new; the original README was renamed and the two references to it were updated. |
+| `.gitignore` | Ignores `/local/` (private notes). |
 
-- [Packages & Distributions](#packages--distributions)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [API Reference](#api-reference)
-- [Demos and Examples](#demos-and-examples)
-- [Benchmark](#benchmark)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
+Plain `CHDB_LITE=1` (the Python wheel) and the full build behave as before.
 
----
+## What the lite build drops
 
-## Packages & Distributions
+- Arrow and Parquet formats, the Arrow stream table function and storage, the ADBC driver, and every `chdb_arrow_*`
+  entry point (`CHDB_NO_ARROW`, `ENABLE_PARQUET=0`).
+- Thrift, Brotli, RapidJSON, S3 and S3-backed disks, Protobuf formats, ORC.
+- Everything `CHDB_LITE` already drops: HDFS, Kerberos, MySQL, Postgres, Azure, Kafka, ICU collation, the embedded
+  JIT compiler, niche functions, some dictionary layouts, and the ASOF/SEMI/ANTI hash joins.
 
-**chdb-core** (this repo) is the engine; [**chDB**](https://github.com/chdb-io/chdb) is a higher-level pandas-compatible DataStore API built on top of it (see the diagram below). The engine itself ships as five distribution artifacts — three Python wheels (same `import chdb`, differing only by build flags) and two JavaScript/WASM packages:
+Kept: MergeTree, `DateTime64`, `LowCardinality`, the JSON formats `chdb-sql` uses, `simdjson`, jemalloc, and the
+`remote()` and `remoteSecure()` table functions (not verified on this build, see Limitations). The JIT compiler is off, but
+`contrib/llvm-project` is still needed for `libcxx`, `libunwind`, `libc` math and `compiler-rt`.
 
-| Artifact | How to get it | Target / runtime | Best for |
-|---|---|---|---|
-| **chdb-core** | PyPI — `pip install chdb-core` | Python 3.9+ (Linux/macOS) | Default full build — everything included |
-| **chdb-core-lite** | PyPI — `pip install chdb-core-lite` | Python 3.9+ (Linux/macOS) | Slimmer build that trims less-common features (e.g. external connectors like MySQL/Kafka) |
-| **chdb-core (free-threaded)** | GitHub release assets | Free-threaded Python 3.14t (no GIL) | Running chDB without the GIL |
-| **chdb-wasm** | npm — `npm install chdb-wasm` | Browsers & Node (WebAssembly) | Running the full engine in the browser or Node |
-| **chdb-cloudflare** | npm — `npm install chdb-cloudflare` | Cloudflare Workers | A slimmer build for Cloudflare Workers |
+## Build
 
-<div align="center">
-<pre>
-┌───────────────────────────────────────────┐
-│          chDB (pip install chdb)          │
-│  ┌─────────────────────────────────────┐  │
-│  │  DataStore: pandas-like lazy API    │  │
-│  │  QueryPlanner / dual-engine exec    │  │
-│  └──────────────────┬──────────────────┘  │
-│                     │                     │
-│  ┌──────────────────▼──────────────────┐  │
-│  │  chdb-core (pip install chdb-core)  │  │
-│  │  C++ ClickHouse Engine              │  │
-│  │  Session / Connection / DB-API      │  │
-│  │  query() / UDF / Stream             │  │
-│  └─────────────────────────────────────┘  │
-└───────────────────────────────────────────┘
-</pre>
-</div>
+Requirements: Linux x86_64 with AVX2, about 7 GB of free disk (measured: 3.1 GB of submodules, 2.5 GB `buildlib/`, 0.7 GB ccache), 15 GB of RAM (the default job caps assume this),
+and clang 21 with lld 21. On Ubuntu 26.04 these come from the distribution:
 
-**chdb-core** provides everything you need to run SQL queries with ClickHouse performance — no server required. If you want a higher-level pandas-compatible DataFrame API, install **chDB** instead.
-
----
-
-## Features
-
-* In-process SQL OLAP Engine, powered by ClickHouse
-* No need to install ClickHouse
-* Minimized data copy from C++ to Python with [python memoryview](https://docs.python.org/3/c-api/memoryview.html)
-* Input & Output support Parquet, CSV, JSON, Arrow, ORC and [60+ more formats](https://clickhouse.com/docs/en/interfaces/formats)
-* Session and Connection management with stateful queries
-* Streaming query support for constant-memory processing
-* Python DB-API 2.0 compliance
-* User Defined Functions (UDF) support
-* AI-assisted SQL generation
-
----
-
-## Architecture
-
-<div align="center">
-  <img src="https://github.com/chdb-io/chdb/raw/main/docs/_static/arch-chdb3.png" width="450">
-</div>
-
----
-
-## Installation
-
-Currently, chdb-core supports Python 3.9+ on macOS and Linux (x86_64 and ARM64).
-
-```bash
-pip install chdb-core
+```
+sudo apt-get install -y --no-install-recommends cmake ninja-build clang-21 lld-21 llvm-21 binutils build-essential ccache
 ```
 
-### Verifying a release download
+On older distributions, get clang 21 from <https://apt.llvm.org>.
 
-Language bindings and packagers fetch the C library straight from a release, as
-`<platform>-libchdb.tar.gz` (shared) or `<platform>-libchdb-static.tar.gz` (static). Every
-release also carries a `SHA256SUMS` covering all of its assets, so a download can be checked
-rather than assumed:
-
-```bash
-TAG=v26.7.2-rc.2
-BASE=https://github.com/chdb-io/chdb-core/releases/download/${TAG}
-
-curl -sSLO ${BASE}/linux-x86_64-libchdb.tar.gz
-curl -sSLO ${BASE}/SHA256SUMS
-
-# --ignore-missing so it checks the files you actually downloaded, not all of the release
-sha256sum -c --ignore-missing SHA256SUMS   # shasum -a 256 -c --ignore-missing on macOS
+```
+git clone https://github.com/tiny-obs/chdb-core && cd chdb-core && git checkout lite-shared
+bash chdb/lite_shared_submodules.sh        # 43 of 156 submodules, about 3 GB
+export CC=clang-21 CXX=clang++-21 CHDB_LITE=1 CHDB_LITE_SHARED=1 CHDB_VERSION=26.9.0
+bash chdb/build.sh
 ```
 
----
+Output: `libchdb.so` in the repository root; the unstripped link output stays in `buildlib/libchdb.so`.
 
-## Quick Start
+- `chdb/lite_shared_submodules.sh` is idempotent. Three submodules are sparse, blobless checkouts:
+  `contrib/llvm-project` (`libc`, `compiler-rt`, `third-party/siphash`, `libcxx`, `libcxxabi`, `libunwind`; about
+  200 MB), `contrib/sysroot` (`README.md` and `linux-x86_64/`; the compile uses it as `--sysroot`), and
+  `contrib/arrow` (`cpp/src/arrow/c/abi.h`, the one header `chdb-internal.h` includes).
+- `CHDB_PARALLEL_COMPILE_JOBS` (default 6) and `CHDB_PARALLEL_LINK_JOBS` (default 1) cap the parallelism so that a
+  15 GB host does not run out of memory. Raise them on a larger machine.
+- Use a fresh `buildlib/`: a CMake cache from a full or Python-module configure does not mix with this one.
+- With a cold ccache the build took about an hour of compile time on 8 cores.
 
-```python
-import chdb
+## Result (measured 2026-10-13, Ubuntu 26.04, clang 21.1.8)
 
-result = chdb.query("SELECT version()", "Pretty")
-print(result)
+- Stripped `libchdb.so`: 177,906,464 bytes (170 MB). Compressed: 57 MB with gzip -9, 38 MB with xz -6. The
+  unstripped link output is 251 MB. The "~50 MB" in the `CHDB_LITE` comments in `CMakeLists.txt` is a compressed
+  wheel size.
+- Build type `MinSizeRel`.
+- `ldd`: `libc`, `libm`, `libpthread`, `librt`, `libdl` and the loader only. Highest versioned glibc symbol: 2.4.
+- 54 exported symbols, all from the C API declared in `programs/local/chdb.h`, without the Arrow and ADBC entry
+  points. The export map is filtered into `buildlib/libchdb_export_noarrow.map` because lld rejects names in a
+  version script that do not exist.
+
+## Use from Go
+
+Load it with [chdb-go](https://github.com/chdb-io/chdb-go) (`chdb-purego`, no cgo) by setting the library path:
+
+```
+CHDB_LIB_PATH=/path/to/libchdb.so go test ./...
 ```
 
----
-
-## API Reference
-
-<details>
-<summary><b>One-shot Query</b></summary>
-
-The simplest way to run SQL — no session or connection needed:
-
-```python
-import chdb
-
-# Basic query with CSV output (default)
-result = chdb.query("SELECT 1, 'hello'")
-print(result)
-
-# Pandas DataFrame output
-df = chdb.query("SELECT number, number * 2 AS double FROM numbers(10)", "DataFrame")
-print(df)
-
-# Parameterized queries
-df = chdb.query(
-    "SELECT toDate({base_date:String}) + number AS date "
-    "FROM numbers({total_days:UInt64}) "
-    "LIMIT {items_per_page:UInt64}",
-    "DataFrame",
-    params={"base_date": "2025-01-01", "total_days": 10, "items_per_page": 5},
-)
-print(df)
-```
-
-</details>
-
-<details>
-<summary><b>Query on Files (Parquet, CSV, JSON, Arrow, ORC and 60+)</b></summary>
-
-```python
-import chdb
-
-res = chdb.query('SELECT * FROM file("data.parquet", Parquet)', "JSON")
-print(res)
-
-res = chdb.query('SELECT * FROM file("data.csv", CSV)', "CSV")
-print(res)
-
-# Query result statistics
-print(f"SQL read {res.rows_read()} rows, {res.bytes_read()} bytes, "
-      f"storage read {res.storage_rows_read()} rows, {res.storage_bytes_read()} bytes, "
-      f"elapsed {res.elapsed()} seconds")
-
-# Pandas DataFrame output
-chdb.query('SELECT * FROM file("data.parquet", Parquet)', "Dataframe")
-```
-
-</details>
-
-<details>
-<summary><b>Connection API</b></summary>
-
-Connection-based API for cursor-style interaction, supporting both in-memory and file-based databases:
-
-```python
-import chdb
-
-conn = chdb.connect(":memory:")
-cur = conn.cursor()
-
-cur.execute("CREATE TABLE test (id UInt32, name String) ENGINE = Memory")
-cur.execute("INSERT INTO test VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')")
-cur.execute("SELECT * FROM test ORDER BY id")
-
-print(cur.fetchone())      # (1, 'Alice')
-print(cur.fetchmany(2))    # ((2, 'Bob'), (3, 'Charlie'))
-print(cur.column_names())  # ['id', 'name']
-print(cur.column_types())  # ['UInt32', 'String']
-
-# Use the cursor as an iterator
-cur.execute("SELECT number FROM system.numbers LIMIT 3")
-for row in cur:
-    print(row)
-
-# Always close resources when done
-cur.close()
-conn.close()
-```
-
-For more details, see [examples/connect.py](examples/connect.py).
-
-```python
-# File-based persistent database
-conn = chdb.connect("mydata.db")
-conn.query("CREATE TABLE IF NOT EXISTS logs (ts DateTime, msg String) ENGINE = MergeTree ORDER BY ts")
-conn.query("INSERT INTO logs VALUES (now(), 'started')")
-result = conn.query("SELECT * FROM logs", "Pretty")
-print(result)
-conn.close()
-```
-
-</details>
-
-<details>
-<summary><b>Stateful Session</b></summary>
-
-Sessions provide a higher-level API with automatic resource management:
-
-```python
-from chdb import session as chs
-
-sess = chs.Session()
-sess.query("CREATE DATABASE IF NOT EXISTS db_xxx ENGINE = Atomic")
-sess.query("CREATE TABLE IF NOT EXISTS db_xxx.log_table (x String, y Int) ENGINE = Log")
-sess.query("INSERT INTO db_xxx.log_table VALUES ('a', 1), ('b', 3), ('c', 2), ('d', 5)")
-sess.query("CREATE VIEW db_xxx.view_xxx AS SELECT * FROM db_xxx.log_table LIMIT 4")
-
-print(sess.query("SELECT * FROM db_xxx.view_xxx", "Pretty"))
-```
-
-see also: [test_stateful.py](tests/test_stateful.py).
-
-</details>
-
-<details>
-<summary><b>Streaming Query</b></summary>
-
-Process large datasets with constant memory usage through chunked streaming:
-
-```python
-from chdb import session as chs
-
-sess = chs.Session()
-
-rows_cnt = 0
-with sess.send_query("SELECT * FROM numbers(200000)", "CSV") as stream_result:
-    for chunk in stream_result:
-        rows_cnt += chunk.rows_read()
-
-print(rows_cnt) # 200000
-
-# Example 2: Manual iteration with fetch()
-rows_cnt = 0
-stream_result = sess.send_query("SELECT * FROM numbers(200000)", "CSV")
-while True:
-    chunk = stream_result.fetch()
-    if chunk is None:
-        break
-    rows_cnt += chunk.rows_read()
-
-print(rows_cnt) # 200000
-```
-
-For more details, see [test_streaming_query.py](tests/test_streaming_query.py).
-
-</details>
-
-<details>
-<summary><b>Python DB-API 2.0</b></summary>
-
-```python
-import chdb.dbapi as dbapi
-print("chdb driver version: {0}".format(dbapi.get_client_info()))
-
-conn1 = dbapi.connect()
-cur1 = conn1.cursor()
-cur1.execute('select version()')
-print("description: ", cur1.description)
-print("data: ", cur1.fetchone())
-cur1.close()
-conn1.close()
-```
-
-</details>
-
-<details>
-<summary><b>Query on Table (Pandas DataFrame, Parquet file/bytes, Arrow bytes)</b></summary>
-
-```python
-import chdb.dataframe as cdf
-import pandas as pd
-# Join 2 DataFrames
-df1 = pd.DataFrame({'a': [1, 2, 3], 'b': ["one", "two", "three"]})
-df2 = pd.DataFrame({'c': [1, 2, 3], 'd': ["①", "②", "③"]})
-ret_tbl = cdf.query(sql="select * from __tbl1__ t1 join __tbl2__ t2 on t1.a = t2.c",
-                  tbl1=df1, tbl2=df2)
-print(ret_tbl)
-# Query on the DataFrame Table
-print(ret_tbl.query('select b, sum(a) from __table__ group by b'))
-# Pandas DataFrames are automatically registered as temporary tables in ClickHouse
-chdb.query("SELECT * FROM Python(df1) t1 JOIN Python(df2) t2 ON t1.a = t2.c").show()
-```
-
-</details>
-
-<details>
-<summary><b>Python Table Engine</b></summary>
-
-#### Query on Pandas DataFrame
-
-```python
-import chdb
-import pandas as pd
-df = pd.DataFrame(
-    {
-        "a": [1, 2, 3, 4, 5, 6],
-        "b": ["tom", "jerry", "auxten", "tom", "jerry", "auxten"],
-    }
-)
-
-chdb.query("SELECT b, sum(a) FROM Python(df) GROUP BY b ORDER BY b").show()
-```
-
-#### Query on Arrow Table
-
-```python
-import chdb
-import pyarrow as pa
-arrow_table = pa.table(
-    {
-        "a": [1, 2, 3, 4, 5, 6],
-        "b": ["tom", "jerry", "auxten", "tom", "jerry", "auxten"],
-    }
-)
-
-chdb.query("SELECT b, sum(a) FROM Python(arrow_table) GROUP BY b ORDER BY b").show()
-```
-
-see also: [test_query_py.py](tests/test_query_py.py).
-
-</details>
-
-<details>
-<summary><b>User Defined Functions (UDF)</b></summary>
-
-chDB supports native Python UDFs that run in-process with full type safety.
-
-```python
-import chdb
-from chdb.session import Session
-from chdb.sqltypes import INT64, STRING
-
-sess = Session()
-
-# Using the @chdb.func decorator
-@chdb.func([INT64, INT64], INT64)
-def add(a, b):
-    return a + b
-
-print(sess.query("SELECT add(12, 22)"))
-
-# With type annotations (types inferred automatically)
-@chdb.func()
-def multiply(a: int, b: int) -> int:
-    return a * b
-
-print(sess.query("SELECT multiply(3, 7)"))
-
-# Using chdb.create_function directly
-chdb.create_function("strlen", len, arg_types=[STRING], return_type=INT64)
-print(sess.query("SELECT strlen('hello')"))
-
-# Remove a registered function
-chdb.drop_function("strlen")
-```
-
-Key features:
-- **Type-safe**: supports `INT64`, `FLOAT64`, `STRING`, `BOOL`, `DATETIME64`, etc. See [chdb.sqltypes](chdb/_chdb/_sqltypes.pyi) for full list.
-- **Type inference**: automatically inferred from Python annotations (`int`, `str`, `bool`, etc.)
-- **NULL handling**: `on_null=NullHandling.SKIP` (default) skips the function call and returns NULL; `NullHandling.PASS` passes `None` to the function.
-- **Exception handling**: `on_error=ExceptionHandling.PROPAGATE` (default) raises the error to the caller; `ExceptionHandling.IGNORE` returns NULL for that row and continues.
-
-See also: [test_func_udf.py](tests/test_func_udf.py), [test_func_udf_types.py](tests/test_func_udf_types.py).
-
-</details>
-
-<details>
-<summary><b>User Defined Aggregate Functions (UDAF)</b></summary>
-
-An aggregate function is a Python accumulator class. chDB creates one accumulator per
-aggregation state, feeds it rows, merges partial states across threads, and asks it for the
-final value.
-
-```python
-import chdb
-from chdb import agg
-from chdb.session import Session
-from chdb.sqltypes import FLOAT64
-
-sess = Session()
-
-@agg([FLOAT64, FLOAT64], FLOAT64, name="wavg")
-class WeightedAvg:
-    def __init__(self):
-        self.num = 0.0
-        self.den = 0.0
-
-    def update(self, value, weight):   # one row
-        self.num += value * weight
-        self.den += weight
-
-    def merge(self, other):            # fold a partial state in
-        self.num += other.num
-        self.den += other.den
-
-    def evaluate(self):                # final value; None becomes NULL
-        return self.num / self.den if self.den else None
-
-print(sess.query("SELECT wavg(v, w) FROM values('v Float64, w Float64', (1.0, 1.0), (4.0, 3.0))"))
-
-# Types can be inferred from annotations, exactly like @chdb.func:
-@agg()
-class py_sum:
-    def __init__(self):
-        self.total = 0
-
-    def update(self, value: int) -> None:
-        self.total += value
-
-    def merge(self, other):
-        self.total += other.total
-
-    def evaluate(self) -> int:
-        return self.total
-
-print(sess.query("SELECT k, py_sum(v) FROM values('k Int64, v Int64', (1, 10), (1, 20), (2, 5)) GROUP BY k ORDER BY k"))
-
-# Or register without the decorator, and remove it again:
-chdb.create_aggregate_function("py_sum2", py_sum)
-chdb.drop_aggregate_function("py_sum2")
-```
-
-Key features:
-- **Combinators work**: `py_sumIf(x, cond)`, `py_sumArray(arr)`, `py_sum(DISTINCT x)`,
-  `py_sumState(x)` / `py_sumMerge(s)` and `arrayReduce('py_sum', arr)` all resolve.
-- **Same type system as UDFs**: `arg_types` / `return_type` accept `ChdbType`, a type string
-  or a Python type, and are inferred from `update()` / `evaluate()` annotations when omitted.
-- **NULL handling**: `on_null="skip"` (default) drops rows where any argument is NULL;
-  `on_null="pass"` delivers `None` to `update()`.
-- **Exception handling**: `on_error="propagate"` (default) raises; `on_error="ignore"` swallows
-  the exception and carries on with the next row. It cannot undo a partial update, though —
-  whatever `update()` changed before raising stays in the accumulator. Exceptions from
-  `merge()` and `evaluate()`, and failures to construct or pickle an accumulator, always
-  propagate.
-- **Optional batch fast path**: define `update_batch(self, *columns)`, receiving one Python
-  list per argument, and ungrouped aggregation calls it once per block instead of once per row.
-  It is only picked up on an accumulator class; a plain callable factory
-  (`lambda: WeightedAvg(bias)`, which is how an accumulator takes parameters) must declare
-  `arg_types` and `return_type` explicitly and always uses the per-row path.
-- **Persistence**: `-State` / `-Merge`, `AggregateFunction(py_sum, Int64)` columns and
-  spill-to-disk aggregation pickle the accumulator, so the class must be importable by name
-  (define it at module level).
-
-See also: [test_func_udaf.py](tests/test_func_udaf.py).
-
-</details>
-
-<details>
-<summary><b>Query Progress</b></summary>
-
-```python
-import chdb
-
-# Auto-detect: TTY progress in terminal, progress bar in notebook
-conn = chdb.connect(":memory:?progress=auto")
-conn.query("SELECT sum(number) FROM numbers_mt(1e10) GROUP BY number % 10 SETTINGS max_threads=4")
-```
-
-Progress options: `progress=auto` | `progress=tty` | `progress=err` | `progress=off`
-
-</details>
-
-<details>
-<summary><b>AI-assisted SQL Generation</b></summary>
-
-```python
-import chdb
-
-conn = chdb.connect("file::memory:?ai_provider=openai&ai_model=gpt-4o-mini")
-conn.query("CREATE TABLE nums (n UInt32) ENGINE = Memory")
-conn.query("INSERT INTO nums VALUES (1), (2), (3)")
-
-sql = conn.generate_sql("Select all rows from nums ordered by n desc")
-print(sql)  # SELECT * FROM nums ORDER BY n DESC
-
-print(conn.ask("List the numbers table", format="Pretty"))
-```
-
-</details>
-
-<details>
-<summary><b>Command Line</b></summary>
-
-> `python3 -m chdb SQL [OutputFormat]`
-```bash
-python3 -m chdb "SELECT 1,'abc'" Pretty
-```
-
-For more examples, see [examples](examples) and [tests](tests).
-
-</details>
-
----
-
-## Demos and Examples
-
-- [Project Documentation](https://clickhouse.com/docs/en/chdb) and [Usage Examples](https://clickhouse.com/docs/en/chdb/install/python)
-- [Colab Notebooks](https://colab.research.google.com/drive/1-zKB6oKfXeptggXi0kUX87iR8ZTSr4P3?usp=sharing) and other [Script Examples](examples)
-
----
-
-## Benchmark
-
-- [ClickBench of embedded engines](https://benchmark.clickhouse.com/#eyJzeXN0ZW0iOnsiQXRoZW5hIChwYXJ0aXRpb25lZCkiOnRydWUsIkF0aGVuYSAoc2luZ2xlKSI6dHJ1ZSwiQXVyb3JhIGZvciBNeVNRTCI6dHJ1ZSwiQXVyb3JhIGZvciBQb3N0Z3JlU1FMIjp0cnVlLCJCeXRlSG91c2UiOnRydWUsImNoREIiOnRydWUsIkNpdHVzIjp0cnVlLCJjbGlja2hvdXNlLWxvY2FsIChwYXJ0aXRpb25lZCkiOnRydWUsImNsaWNraG91c2UtbG9jYWwgKHNpbmdsZSkiOnRydWUsIkNsaWNrSG91c2UiOnRydWUsIkNsaWNrSG91c2UgKHR1bmVkKSI6dHJ1ZSwiQ2xpY2tIb3VzZSAoenN0ZCkiOnRydWUsIkNsaWNrSG91c2UgQ2xvdWQiOnRydWUsIkNsaWNrSG91c2UgKHdlYikiOnRydWUsIkNyYXRlREIiOnRydWUsIkRhdGFiZW5kIjp0cnVlLCJEYXRhRnVzaW9uIChzaW5nbGUpIjp0cnVlLCJBcGFjaGUgRG9yaXMiOnRydWUsIkRydWlkIjp0cnVlLCJEdWNrREIgKFBhcnF1ZXQpIjp0cnVlLCJEdWNrREIiOnRydWUsIkVsYXN0aWNzZWFyY2giOnRydWUsIkVsYXN0aWNzZWFyY2ggKHR1bmVkKSI6ZmFsc2UsIkdyZWVucGx1bSI6dHJ1ZSwiSGVhdnlBSSI6dHJ1ZSwiSHlkcmEiOnRydWUsIkluZm9icmlnaHQiOnRydWUsIktpbmV0aWNhIjp0cnVlLCJNYXJpYURCIENvbHVtblN0b3JlIjp0cnVlLCJNYXJpYURCIjpmYWxzZSwiTW9uZXREQiI6dHJ1ZSwiTW9uZ29EQiI6dHJ1ZSwiTXlTUUwgKE15SVNBTSkiOnRydWUsIk15U1FMIjp0cnVlLCJQaW5vdCI6dHJ1ZSwiUG9zdGdyZVNRTCI6dHJ1ZSwiUG9zdGdyZVNRTCAodHVuZWQpIjpmYWxzZSwiUXVlc3REQiAocGFydGl0aW9uZWQpIjp0cnVlLCJRdWVzdERCIjp0cnVlLCJSZWRzaGlmdCI6dHJ1ZSwiU2VsZWN0REIiOnRydWUsIlNpbmdsZVN0b3JlIjp0cnVlLCJTbm93Zmxha2UiOnRydWUsIlNRTGl0ZSI6dHJ1ZSwiU3RhclJvY2tzIjp0cnVlLCJUaW1lc2NhbGVEQiAoY29tcHJlc3Npb24pIjp0cnVlLCJUaW1lc2NhbGVEQiI6dHJ1ZX0sInR5cGUiOnsic3RhdGVsZXNzIjpmYWxzZSwibWFuYWdlZCI6ZmFsc2UsIkphdmEiOmZhbHNlLCJjb2x1bW4tb3JpZW50ZWQiOmZhbHNlLCJDKysiOmZhbHNlLCJNeVNRTCBjb21wYXRpYmxlIjpmYWxzZSwicm93LW9yaWVudGVkIjpmYWxzZSwiQyI6ZmFsc2UsIlBvc3RncmVTUUwgY29tcGF0aWJsZSI6ZmFsc2UsIkNsaWNrSG91c2UgZGVyaXZhdGl2ZSI6ZmFsc2UsImVtYmVkZGVkIjp0cnVlLCJzZXJ2ZXJsZXNzIjpmYWxzZSwiUnVzdCI6ZmFsc2UsInNlYXJjaCI6ZmFsc2UsImRvY3VtZW50IjpmYWxzZSwidGltZS1zZXJpZXMiOmZhbHNlfSwibWFjaGluZSI6eyJzZXJ2ZXJsZXNzIjp0cnVlLCIxNmFjdSI6dHJ1ZSwiTCI6dHJ1ZSwiTSI6dHJ1ZSwiUyI6dHJ1ZSwiWFMiOnRydWUsImM2YS5tZXRhbCwgNTAwZ2IgZ3AyIjp0cnVlLCJjNmEuNHhsYXJnZSwgNTAwZ2IgZ3AyIjp0cnVlLCJjNS40eGxhcmdlLCA1MDBnYiBncDIiOnRydWUsIjE2IHRocmVhZHMiOnRydWUsIjIwIHRocmVhZHMiOnRydWUsIjI0IHRocmVhZHMiOnRydWUsIjI4IHRocmVhZHMiOnRydWUsIjMwIHRocmVhZHMiOnRydWUsIjQ4IHRocmVhZHMiOnRydWUsIjYwIHRocmVhZHMiOnRydWUsIm01ZC4yNHhsYXJnZSI6dHJ1ZSwiYzVuLjR4bGFyZ2UsIDIwMGdiIGdwMiI6dHJ1ZSwiYzZhLjR4bGFyZ2UsIDE1MDBnYiBncDIiOnRydWUsImRjMi44eGxhcmdlIjp0cnVlLCJyYTMuMTZ4bGFyZ2UiOnRydWUsInJhMy40eGxhcmdlIjp0cnVlLCJyYTMueGxwbHVzIjp0cnVlLCJTMjQiOnRydWUsIlMyIjp0cnVlLCIyWEwiOnRydWUsIjNYTCI6dHJ1ZSwiNFhMIjp0cnVlLCJYTCI6dHJ1ZX0sImNsdXN0ZXJfc2l6ZSI6eyIxIjp0cnVlLCIyIjp0cnVlLCI0Ijp0cnVlLCI4Ijp0cnVlLCIxNiI6dHJ1ZSwiMzIiOnRydWUsIjY0Ijp0cnVlLCIxMjgiOnRydWUsInNlcnZlcmxlc3MiOnRydWUsInVuZGVmaW5lZCI6dHJ1ZX0sIm1ldHJpYyI6ImhvdCIsInF1ZXJpZXMiOlt0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlXX0=)
-
-- [chDB vs Pandas](https://colab.research.google.com/drive/1FogLujJ_-ds7RGurDrUnK-U0IW8a8Qd0)
-
-- [Benchmark on DataFrame: chDB Pandas DuckDB Polars](https://benchmark.clickhouse.com/#eyJzeXN0ZW0iOnsiQWxsb3lEQiI6dHJ1ZSwiQWxsb3lEQiAodHVuZWQpIjp0cnVlLCJBdGhlbmEgKHBhcnRpdGlvbmVkKSI6dHJ1ZSwiQXRoZW5hIChzaW5nbGUpIjp0cnVlLCJBdXJvcmEgZm9yIE15U1FMIjp0cnVlLCJBdXJvcmEgZm9yIFBvc3RncmVTUUwiOnRydWUsIkJ5Q29uaXR5Ijp0cnVlLCJCeXRlSG91c2UiOnRydWUsImNoREIgKERhdGFGcmFtZSkiOnRydWUsImNoREIgKFBhcnF1ZXQsIHBhcnRpdGlvbmVkKSI6dHJ1ZSwiY2hEQiI6dHJ1ZSwiQ2l0dXMiOnRydWUsIkNsaWNrSG91c2UgQ2xvdWQgKGF3cykiOnRydWUsIkNsaWNrSG91c2UgQ2xvdWQgKGF6dXJlKSI6dHJ1ZSwiQ2xpY2tIb3VzZSBDbG91ZCAoZ2NwKSI6dHJ1ZSwiQ2xpY2tIb3VzZSAoZGF0YSBsYWtlLCBwYXJ0aXRpb25lZCkiOnRydWUsIkNsaWNrSG91c2UgKGRhdGEgbGFrZSwgc2luZ2xlKSI6dHJ1ZSwiQ2xpY2tIb3VzZSAoUGFycXVldCwgcGFydGl0aW9uZWQpIjp0cnVlLCJDbGlja0hvdXNlIChQYXJxdWV0LCBzaW5nbGUpIjp0cnVlLCJDbGlja0hvdXNlICh3ZWIpIjp0cnVlLCJDbGlja0hvdXNlIjp0cnVlLCJDbGlja0hvdXNlICh0dW5lZCkiOnRydWUsIkNsaWNrSG91c2UgKHR1bmVkLCBtZW1vcnkpIjp0cnVlLCJDbG91ZGJlcnJ5Ijp0cnVlLCJDcmF0ZURCIjp0cnVlLCJDcnVuY2h5IEJyaWRnZSBmb3IgQW5hbHl0aWNzIChQYXJxdWV0KSI6dHJ1ZSwiRGF0YWJlbmQiOnRydWUsIkRhdGFGdXNpb24gKFBhcnF1ZXQsIHBhcnRpdGlvbmVkKSI6dHJ1ZSwiRGF0YUZ1c2lvbiAoUGFycXVldCwgc2luZ2xlKSI6dHJ1ZSwiQXBhY2hlIERvcmlzIjp0cnVlLCJEcnVpZCI6dHJ1ZSwiRHVja0RCIChEYXRhRnJhbWUpIjp0cnVlLCJEdWNrREIgKFBhcnF1ZXQsIHBhcnRpdGlvbmVkKSI6dHJ1ZSwiRHVja0RCIjp0cnVlLCJFbGFzdGljc2VhcmNoIjp0cnVlLCJFbGFzdGljc2VhcmNoICh0dW5lZCkiOmZhbHNlLCJHbGFyZURCIjp0cnVlLCJHcmVlbnBsdW0iOnRydWUsIkhlYXZ5QUkiOnRydWUsIkh5ZHJhIjp0cnVlLCJJbmZvYnJpZ2h0Ijp0cnVlLCJLaW5ldGljYSI6dHJ1ZSwiTWFyaWFEQiBDb2x1bW5TdG9yZSI6dHJ1ZSwiTWFyaWFEQiI6ZmFsc2UsIk1vbmV0REIiOnRydWUsIk1vbmdvREIiOnRydWUsIk1vdGhlcmR1Y2siOnRydWUsIk15U1FMIChNeUlTQU0pIjp0cnVlLCJNeVNRTCI6dHJ1ZSwiT3hsYSI6dHJ1ZSwiUGFuZGFzIChEYXRhRnJhbWUpIjp0cnVlLCJQYXJhZGVEQiAoUGFycXVldCwgcGFydGl0aW9uZWQpIjp0cnVlLCJQYXJhZGVEQiAoUGFycXVldCwgc2luZ2xlKSI6dHJ1ZSwiUGlub3QiOnRydWUsIlBvbGFycyAoRGF0YUZyYW1lKSI6dHJ1ZSwiUG9zdGdyZVNRTCAodHVuZWQpIjpmYWxzZSwiUG9zdGdyZVNRTCI6dHJ1ZSwiUXVlc3REQiAocGFydGl0aW9uZWQpIjp0cnVlLCJRdWVzdERCIjp0cnVlLCJSZWRzaGlmdCI6dHJ1ZSwiU2luZ2xlU3RvcmUiOnRydWUsIlNub3dmbGFrZSI6dHJ1ZSwiU1FMaXRlIjp0cnVlLCJTdGFyUm9ja3MiOnRydWUsIlRhYmxlc3BhY2UiOnRydWUsIlRlbWJvIE9MQVAgKGNvbHVtbmFyKSI6dHJ1ZSwiVGltZXNjYWxlREIgKGNvbXByZXNzaW9uKSI6dHJ1ZSwiVGltZXNjYWxlREIiOnRydWUsIlVtYnJhIjp0cnVlfSwidHlwZSI6eyJDIjpmYWxzZSwiY29sdW1uLW9yaWVudGVkIjpmYWxzZSwiUG9zdGdyZVNRTCBjb21wYXRpYmxlIjpmYWxzZSwibWFuYWdlZCI6ZmFsc2UsImdjcCI6ZmFsc2UsInN0YXRlbGVzcyI6ZmFsc2UsIkphdmEiOmZhbHNlLCJDKysiOmZhbHNlLCJNeVNRTCBjb21wYXRpYmxlIjpmYWxzZSwicm93LW9yaWVudGVkIjpmYWxzZSwiQ2xpY2tIb3VzZSBkZXJpdmF0aXZlIjpmYWxzZSwiZW1iZWRkZWQiOmZhbHNlLCJzZXJ2ZXJsZXNzIjpmYWxzZSwiZGF0YWZyYW1lIjp0cnVlLCJhd3MiOmZhbHNlLCJhenVyZSI6ZmFsc2UsImFuYWx5dGljYWwiOmZhbHNlLCJSdXN0IjpmYWxzZSwic2VhcmNoIjpmYWxzZSwiZG9jdW1lbnQiOmZhbHNlLCJzb21ld2hhdCBQb3N0Z3JlU1FMIGNvbXBhdGlibGUiOmZhbHNlLCJ0aW1lLXNlcmllcyI6ZmFsc2V9LCJtYWNoaW5lIjp7IjE2IHZDUFUgMTI4R0IiOnRydWUsIjggdkNQVSA2NEdCIjp0cnVlLCJzZXJ2ZXJsZXNzIjp0cnVlLCIxNmFjdSI6dHJ1ZSwiYzZhLjR4bGFyZ2UsIDUwMGdiIGdwMiI6dHJ1ZSwiTCI6dHJ1ZSwiTSI6dHJ1ZSwiUyI6dHJ1ZSwiWFMiOnRydWUsImM2YS5tZXRhbCwgNTAwZ2IgZ3AyIjp0cnVlLCIxOTJHQiI6dHJ1ZSwiMjRHQiI6dHJ1ZSwiMzYwR0IiOnRydWUsIjQ4R0IiOnRydWUsIjcyMEdCIjp0cnVlLCI5NkdCIjp0cnVlLCJkZXYiOnRydWUsIjcwOEdCIjp0cnVlLCJjNW4uNHhsYXJnZSwgNTAwZ2IgZ3AyIjp0cnVlLCJBbmFseXRpY3MtMjU2R0IgKDY0IHZDb3JlcywgMjU2IEdCKSI6dHJ1ZSwiYzUuNHhsYXJnZSwgNTAwZ2IgZ3AyIjp0cnVlLCJjNmEuNHhsYXJnZSwgMTUwMGdiIGdwMiI6dHJ1ZSwiY2xvdWQiOnRydWUsImRjMi44eGxhcmdlIjp0cnVlLCJyYTMuMTZ4bGFyZ2UiOnRydWUsInJhMy40eGxhcmdlIjp0cnVlLCJyYTMueGxwbHVzIjp0cnVlLCJTMiI6dHJ1ZSwiUzI0Ijp0cnVlLCIyWEwiOnRydWUsIjNYTCI6dHJ1ZSwiNFhMIjp0cnVlLCJYTCI6dHJ1ZSwiTDEgLSAxNkNQVSAzMkdCIjp0cnVlLCJjNmEuNHhsYXJnZSwgNTAwZ2IgZ3AzIjp0cnVlfSwiY2x1c3Rlcl9zaXplIjp7IjEiOnRydWUsIjIiOnRydWUsIjQiOnRydWUsIjgiOnRydWUsIjE2Ijp0cnVlLCIzMiI6dHJ1ZSwiNjQiOnRydWUsIjEyOCI6dHJ1ZSwic2VydmVybGVzcyI6dHJ1ZX0sIm1ldHJpYyI6ImhvdCIsInF1ZXJpZXMiOlt0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlLHRydWUsdHJ1ZSx0cnVlXX0=)
-
-
-<div align="center">
-    <img src="https://github.com/chdb-io/chdb/raw/main/docs/_static/df_bench.png" width="800">
-</div>
----
-
-## Documentation
-- For chDB specific examples and documentation refer to [chDB docs](https://clickhouse.com/docs/en/chdb)
-- For SQL syntax, please refer to [ClickHouse SQL Reference](https://clickhouse.com/docs/en/sql-reference/syntax)
-- For pandas-like DataStore API, see [chDB](https://github.com/chdb-io/chdb)
-
----
-
-## AI Coding Agent Skill
-
-chDB provides an [AI Skill](agent/skills/using-chdb/) that teaches AI coding agents (Cursor, Claude Code, etc.) chDB's multi-source data analytics API. Install it so your AI assistant can write correct chDB code out of the box:
-
-```bash
-curl -sL https://raw.githubusercontent.com/chdb-io/chdb/main/install_skill.sh | bash
-```
-
----
-
-## Events
-
-- Demo chDB at [ClickHouse v23.7 livehouse!](https://t.co/todc13Kn19) and [Slides](https://docs.google.com/presentation/d/1ikqjOlimRa7QAg588TAB_Fna-Tad2WMg7_4AgnbQbFA/edit?usp=sharing)
-
----
-
-## Contributing
-
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
-
-- [ ] Help test and report bugs
-- [ ] Help improve documentation
-- [ ] Help improve code quality and performance
-
-### Bindings
-
-We welcome bindings for other languages, please refer to [bindings](bindings.md) for more details.
-
----
-
-## Version Guide
-
-Please refer to [VERSION-GUIDE.md](VERSION-GUIDE.md) for more details.
-
----
-
-## Paper
-
-- [ClickHouse - Lightning Fast Analytics for Everyone](https://www.vldb.org/pvldb/vol17/p3731-schulze.pdf)
-
----
-
-## License
-
-Apache 2.0, see [LICENSE](LICENSE.txt) for more information.
-
----
-
-## Acknowledgments
-
-chDB is mainly based on [ClickHouse](https://github.com/ClickHouse/ClickHouse) [^1]
-for trade mark and other reasons, I named it chDB.
-
----
-
-## Contact
-
-- Discord: [https://discord.gg/D2Daa2fM5K](https://discord.gg/D2Daa2fM5K)
-- Email: auxten@clickhouse.com
-- Twitter: [@chdb](https://twitter.com/chdb_io)
-
-<br>
-
-[^1]: ClickHouse® is a trademark of ClickHouse Inc. All trademarks, service marks, and logos mentioned or depicted are the property of their respective owners. The use of any third-party trademarks, brand names, product names, and company names does not imply endorsement, affiliation, or association with the respective owners.
+`chdb-purego` looks at `CHDB_LIB_PATH` first, then `libchdb.so` on `PATH`, then `/usr/local/lib/libchdb.so`; check
+`/proc/self/maps` if you need to be sure which file was loaded.
+
+The stock chdb-go `database/sql` driver does not work with this library: it needs Parquet and a single session. Use
+[tiny-obs/chdb-sql](https://github.com/tiny-obs/chdb-sql) (module `github.com/tiny-obs/chdb-sql`, package
+`chdbsql`) instead: one connection per pooled `driver.Conn`, results read as `JSONCompactEachRowWithNamesAndTypes`.
+
+## Verification done
+
+- `chdb-sql` test suite against the stripped library: 30 consecutive runs without failure.
+- On a scratch directory, through `chdb-sql`: `CREATE TABLE` for a `logs` table
+  (`DateTime64(3)`, `LowCardinality(String)`, `String`, `MergeTree ORDER BY ts`) and a `metrics` table; one batched
+  `INSERT ... FORMAT JSONEachRow` of 1000 rows into each; `GROUP BY` and `toStartOfMinute` aggregates with the
+  expected counts and sums; closing and reopening the data directory kept all rows; `TRUNCATE` and `DROP` worked.
+- A read-only open of a copy of an existing data directory written by ClickHouse 26.9.x: 12 tables, same row counts.
+- `Parquet` format and `s3()` return errors, as intended.
+
+## Known issue: chdb-go v1.12.0 `Free` on an unfinished stream
+
+`chdb-purego` `streamingResult.Free` (`streaming.go`) calls `chdbStreamCancelQuery(c.curConn, c.stream)`, but every
+other call passes `c.curConn.internal_data`. libchdb therefore reads the connection cell as the connection, and
+`chdb_stream_cancel_query` can lock a mutex in the wrong object: the process hangs, or rarely crashes with SIGSEGV.
+It happens on any stream that has not reached its natural end (a failed query, or closing before the last row),
+with this library and with the full prebuilt one (a `chdb-sql` test run hung in 6 of 8 runs with the lite library
+and crashed in 1 of 8 with the prebuilt one). This is a chdb-go bug, not a libchdb bug. `chdb-sql` works around it
+by not freeing unfinished streams; the small result handle leaks until the connection closes.
+
+## Limitations
+
+- `remote()` and `remoteSecure()` are not verified on this build. `remote()` was only exercised against the full
+  prebuilt library.
+- Needs a CPU with AVX2 (`-march=x86-64-v3`).
+- Built and tested on Linux x86_64 only; `CHDB_LITE_SHARED=1` exits on other systems.
+- Arrow, Parquet, ORC, S3 and Protobuf are not available, and `CHDB_NO_ARROW` cannot be combined with the Python
+  module.
