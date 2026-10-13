@@ -51,7 +51,7 @@ namespace DB
 namespace CHDB
 {
 
-#if !USE_PYTHON && !defined(OS_WASM)
+#if !USE_PYTHON && !defined(OS_WASM) && !defined(CHDB_NO_ARROW)
 extern "C"
 {
     extern chdb_state chdb_arrow_scan(chdb_connection, const char *, chdb_arrow_stream);

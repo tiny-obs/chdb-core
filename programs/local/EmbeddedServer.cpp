@@ -5,7 +5,7 @@
 #if USE_PYTHON
 #include "TableFunctionPython.h"
 #endif
-#if !defined(OS_WASM)
+#if !defined(OS_WASM) && !defined(CHDB_NO_ARROW)
 #include "StorageArrowStream.h"
 #include "TableFunctionArrowStream.h"
 #endif
@@ -700,11 +700,13 @@ try
             registerAggregateFunctions();
 
             registerTableFunctions();
+#if USE_PYTHON || (!defined(OS_WASM) && !defined(CHDB_NO_ARROW))
             auto & table_function_factory = TableFunctionFactory::instance();
+#endif
 #if USE_PYTHON
             registerTableFunctionPython(table_function_factory);
 #endif
-#if !defined(OS_WASM)
+#if !defined(OS_WASM) && !defined(CHDB_NO_ARROW)
             /// Also in Python builds: the ADBC driver's ingest path uses it.
             registerTableFunctionArrowStream(table_function_factory);
 #endif
@@ -712,7 +714,7 @@ try
             registerDatabases();
             registerStorages();
             CHDB::registerDataFrameOutputFormat();
-#if !defined(OS_WASM)
+#if !defined(OS_WASM) && !defined(CHDB_NO_ARROW)
             auto & storage_factory = StorageFactory::instance();
             registerStorageArrowStream(storage_factory);
 #endif

@@ -1,5 +1,17 @@
-if (OS_WASM)
-    # WebAssembly build: Apache Arrow is not compiled for wasm, so the Arrow
+# CHDB_NO_ARROW: build the core C API and embedded server without the Arrow stream / ADBC
+# integration, so Apache Arrow and Parquet need not be compiled (the same source set as OS_WASM).
+# Drops the chdb_arrow_* / chdb_adbc_* / AdbcDriverInit entry points from libchdb.so. Not usable
+# with the Python module, which consumes the Arrow stream code.
+option (CHDB_NO_ARROW "Build libchdb without the Arrow stream and ADBC integration" OFF)
+if (CHDB_NO_ARROW)
+    if (USE_PYTHON)
+        message (FATAL_ERROR "CHDB_NO_ARROW cannot be combined with ENABLE_PYTHON: the Python module needs the Arrow stream sources")
+    endif ()
+    add_compile_definitions (CHDB_NO_ARROW=1)
+endif ()
+
+if (OS_WASM OR CHDB_NO_ARROW)
+    # Apache Arrow is not compiled here (wasm, or CHDB_NO_ARROW), so the Arrow
     # stream integration (register/scan/storage/table-function) is omitted. Only
     # the core chdb C API + embedded local server are built. chdb-internal.h still
     # references the standalone Arrow C Data Interface header (arrow/c/abi.h),
@@ -151,11 +163,11 @@ set (CLICKHOUSE_LOCAL_LINK
 
 clickhouse_program_add(local)
 
-if (OS_WASM)
+if (OS_WASM OR CHDB_NO_ARROW)
     # chdb-internal.h includes the standalone Arrow C Data Interface header
     # (arrow/c/abi.h, dependency-free apart from <stdint.h>) for the
     # ArrowArrayStream type referenced by the C API surface. Arrow proper is not
-    # built for wasm, so expose just this header from the arrow source tree.
+    # built here, so expose just this header from the arrow source tree.
     target_include_directories(clickhouse-local-lib PRIVATE
         "${ClickHouse_SOURCE_DIR}/contrib/arrow/cpp/src")
 endif()

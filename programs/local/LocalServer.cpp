@@ -4,7 +4,7 @@
 #include "ChunkCollectorOutputFormat.h"
 #if USE_PYTHON
 #include "TableFunctionPython.h"
-#elif !defined(OS_WASM)
+#elif !defined(OS_WASM) && !defined(CHDB_NO_ARROW)
 #include "StorageArrowStream.h"
 #include "TableFunctionArrowStream.h"
 #endif
